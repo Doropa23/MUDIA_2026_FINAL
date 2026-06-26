@@ -881,9 +881,110 @@ function carregarEstado() {
 function salvarEstado() {
     localStorage.setItem('copa26_res',  JSON.stringify(resultados));
     localStorage.setItem('copa26_marc', JSON.stringify(marcadores));
-    // Auto-guarda no Sheets com debounce de 2s após última alteração
+    // Debounce de 2s — evita guardar em cada tecla
     clearTimeout(syncTimer);
-    syncTimer = setTimeout(() => guardarSheets(true), 2000);
+    syncTimer = setTimeout(() => guardarComMerge(true), 2000);
+}
+
+// Merge local: une dados do servidor com dados locais
+// Os dados locais têm prioridade (são mais recentes para este utilizador)
+// Mas preserva dados do servidor que este utilizador não tem
+function mergeResultados(servidor, local) {
+    var merged = Object.assign({}, servidor);
+    var ids = Object.keys(local);
+    for (var i = 0; i < ids.length; i++) {
+        var id  = ids[i];
+        var loc = local[id];
+        // Só sobrescreve se o valor local tiver dados reais
+        if (loc.casa !== '' || loc.fora !== '') {
+            merged[id] = loc;
+        }
+    }
+    return merged;
+}
+
+function mergeMarcadores(servidor, local) {
+    var merged = JSON.parse(JSON.stringify(servidor)); // deep clone
+    var ids = Object.keys(local);
+    for (var i = 0; i < ids.length; i++) {
+        var id   = ids[i];
+        var loc  = local[id];
+        // Se este utilizador tem marcadores para este jogo, usa os locais
+        var temLocal = (loc.casa && loc.casa.length > 0) || (loc.fora && loc.fora.length > 0);
+        if (temLocal) {
+            merged[id] = loc;
+        }
+    }
+    return merged;
+}
+
+// Guarda com merge: carrega servidor → merge → guarda resultado final
+async function guardarComMerge(silencioso) {
+    if (_syncEmCurso) return;
+    _syncEmCurso = true;
+
+    var icon   = document.getElementById('syncIcon');
+    var label  = document.getElementById('syncLabel');
+    var status = document.getElementById('syncStatus');
+    var btn    = document.getElementById('syncBtn');
+    if (btn)    btn.style.opacity = '0.7';
+    if (icon)   icon.textContent  = '🔄';
+    if (label)  label.textContent = 'A sincronizar...';
+
+    try {
+        // 1. Ler dados actuais do servidor
+        var dadosServidor = await jsonpFetch({ acao: 'carregar' });
+        var resServidor   = (dadosServidor && dadosServidor.resultados) ? dadosServidor.resultados : {};
+        var marcServidor  = (dadosServidor && dadosServidor.marcadores) ? dadosServidor.marcadores : {};
+
+        // 2. Merge: servidor como base + dados locais por cima
+        var resMerged  = mergeResultados(resServidor,  resultados);
+        var marcMerged = mergeMarcadores(marcServidor, marcadores);
+
+        // 3. Actualizar estado local com o merge
+        resultados = resMerged;
+        marcadores = marcMerged;
+        localStorage.setItem('copa26_res',  JSON.stringify(resultados));
+        localStorage.setItem('copa26_marc', JSON.stringify(marcadores));
+
+        // 4. Guardar merge no servidor
+        await jsonpFetch({
+            acao:       'salvar',
+            resultados: JSON.stringify(resMerged),
+            marcadores: JSON.stringify(marcMerged),
+            timestamp:  new Date().toISOString()
+        });
+
+        var hora = new Date().toLocaleTimeString('pt-PT', {hour:'2-digit', minute:'2-digit'});
+        if (!silencioso) mostrarToast('✅ Guardado às ' + hora);
+        if (icon)   icon.textContent   = '✅';
+        if (label)  label.textContent  = 'Guardado';
+        if (status) status.textContent = 'Último sync: ' + hora;
+        setTimeout(function() {
+            if (icon)  icon.textContent  = '☁️';
+            if (label) label.textContent = 'Sincronizar agora';
+        }, 3000);
+
+    } catch (err) {
+        // Fallback: tenta guardar directamente sem merge
+        try {
+            await jsonpFetch({
+                acao:       'salvar',
+                resultados: JSON.stringify(resultados),
+                marcadores: JSON.stringify(marcadores),
+                timestamp:  new Date().toISOString()
+            });
+            if (!silencioso) mostrarToast('✅ Guardado (sem merge)');
+        } catch(err2) {
+            if (!silencioso) mostrarToast('⚠️ Erro ao guardar.');
+            if (icon)   icon.textContent   = '⚠️';
+            if (label)  label.textContent  = 'Tentar novamente';
+            if (status) status.textContent = 'Falha: ' + err.message;
+        }
+    } finally {
+        _syncEmCurso = false;
+        if (btn) btn.style.opacity = '1';
+    }
 }
 
 // ============================================================
@@ -1425,43 +1526,8 @@ function jsonpFetch(params) {
     });
 }
 
-async function guardarSheets(silencioso) {
-    if (_syncEmCurso) return;
-    _syncEmCurso = true;
-    var icon   = document.getElementById('syncIcon');
-    var label  = document.getElementById('syncLabel');
-    var status = document.getElementById('syncStatus');
-    var btn    = document.getElementById('syncBtn');
-    if (btn)    btn.style.opacity   = '0.7';
-    if (icon)   icon.textContent    = '🔄';
-    if (label)  label.textContent   = 'A guardar...';
-    try {
-        await jsonpFetch({
-            acao:       'salvar',
-            resultados: JSON.stringify(resultados),
-            marcadores: JSON.stringify(marcadores),
-            timestamp:  new Date().toISOString()
-        });
-        _ultimoSync = new Date();
-        var hora = _ultimoSync.toLocaleTimeString('pt-PT', {hour:'2-digit', minute:'2-digit'});
-        if (!silencioso) mostrarToast('✅ Guardado às ' + hora);
-        if (icon)   icon.textContent    = '✅';
-        if (label)  label.textContent   = 'Guardado';
-        if (status) status.textContent  = 'Último sync: ' + hora;
-        setTimeout(function() {
-            if (icon)  icon.textContent  = '☁️';
-            if (label) label.textContent = 'Sincronizar agora';
-        }, 3000);
-    } catch (err) {
-        if (!silencioso) mostrarToast('⚠️ Erro ao guardar.');
-        if (icon)   icon.textContent    = '⚠️';
-        if (label)  label.textContent   = 'Tentar novamente';
-        if (status) status.textContent  = 'Falha: ' + err.message;
-    } finally {
-        _syncEmCurso = false;
-        if (btn) btn.style.opacity = '1';
-    }
-}
+// guardarSheets → alias para guardarComMerge (evita sobrescrita entre utilizadores)
+function guardarSheets(silencioso) { return guardarComMerge(silencioso); }
 
 async function carregarSheets() {
     var icon   = document.getElementById('syncIcon');
